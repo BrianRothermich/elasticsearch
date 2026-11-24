@@ -10,7 +10,6 @@
 package org.elasticsearch.snapshots;
 
 import org.elasticsearch.common.UUIDs;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.repositories.blobstore.BlobStoreRepository;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.junit.annotations.TestLogging;
@@ -71,13 +70,13 @@ public class SnapshotMetadataCaseCollisionIT extends AbstractSnapshotIntegTestCa
         final BlobStoreRepository repository = getRepositoryOnMaster(repo);
         final var originalMetadata = repository.getSnapshotIndexMetaData(data, source, indexId);
         logger.info(
-            "LIFECYCLE source written: generation [{}], snapshot [{}], index [{}], blob [{}], settings version [{}], refresh interval [{}]",
+            "LIFECYCLE source written: generation [{}], snapshot [{}], index [{}], blob [{}], settings version [{}], mapping version [{}]",
             data.getGenId(),
             source,
             indexId,
             sourceBlob,
             originalMetadata.getSettingsVersion(),
-            originalMetadata.getSettings().get("index.refresh_interval")
+            originalMetadata.getMappingVersion()
         );
         assertAcked(clusterAdmin().prepareCloneSnapshot(TEST_REQUEST_TIMEOUT, repo, "source", "clone").setIndices(index).get());
         final var clone = getSnapshot(repo, "clone").snapshotId();
@@ -98,7 +97,8 @@ public class SnapshotMetadataCaseCollisionIT extends AbstractSnapshotIntegTestCa
             cloneOnly.indexMetaDataGenerations().indexMetaBlobId(clone, indexId),
             metadataAfterSourceDeletion.getSettingsVersion()
         );
-        assertAcked(indicesAdmin().prepareUpdateSettings(index).setSettings(Settings.builder().put("index.refresh_interval", "2s")));
+        // Match the stress test: introducing an unmapped field changes the metadata through dynamic mapping.
+        client().prepareIndex(index).setSource("field-1", "value").get();
 
         final int target = sequence(otherUuidBytes) - 1;
         boolean reachedTarget = false;
@@ -116,7 +116,7 @@ public class SnapshotMetadataCaseCollisionIT extends AbstractSnapshotIntegTestCa
         final var metadataAfterOtherSnapshot = repository.getSnapshotIndexMetaData(withOther, clone, indexId);
         final String otherBlob = withOther.indexMetaDataGenerations().indexMetaBlobId(other, indexId);
         logger.info(
-            "LIFECYCLE other written: generation [{}], snapshot [{}], blob [{}], surviving clone [{}], blob [{}], settings version [{} -> {}], refresh interval [{} -> {}]",
+            "LIFECYCLE other written: generation [{}], snapshot [{}], blob [{}], surviving clone [{}], blob [{}], settings version [{} -> {}], mapping version [{} -> {}]",
             withOther.getGenId(),
             other,
             otherBlob,
@@ -124,9 +124,15 @@ public class SnapshotMetadataCaseCollisionIT extends AbstractSnapshotIntegTestCa
             withOther.indexMetaDataGenerations().indexMetaBlobId(clone, indexId),
             originalMetadata.getSettingsVersion(),
             metadataAfterOtherSnapshot.getSettingsVersion(),
-            originalMetadata.getSettings().get("index.refresh_interval"),
-            metadataAfterOtherSnapshot.getSettings().get("index.refresh_interval")
+            originalMetadata.getMappingVersion(),
+            metadataAfterOtherSnapshot.getMappingVersion()
         );
+        final var otherMetadata = repository.getSnapshotIndexMetaData(withOther, other, indexId);
+        assertTrue(
+            "dynamic mapping must advance the mapping version",
+            otherMetadata.getMappingVersion() > originalMetadata.getMappingVersion()
+        );
+        assertEquals(originalMetadata.getSettingsVersion(), otherMetadata.getSettingsVersion());
         logger.info("LIFECYCLE deleting snapshot [{}] with metadata blob [{}]", other, otherBlob);
         assertAcked(startDeleteSnapshot(repo, "other").get());
         final var surviving = getRepositoryData(repo);
